@@ -42,7 +42,6 @@ jobs:
           push: true
           tags: |
             ${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.TAG }}
-            ${{ env.IMAGE_NAME }}:latest
 
       # manifest-repo 클론
       - name: Checkout manifest repo
