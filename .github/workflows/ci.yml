@@ -67,6 +67,7 @@ jobs:
         working-directory: ${{ env.MANIFEST_REPO_NAME }}
         env:
           TAG: ${{ steps.vars.outputs.TAG }}
+          KUSTOMIZE_IMAGE_NAME: ${{ env.KUSTOMIZE_IMAGE_NAME }}
         run: |
           set -euxo pipefail
           FILE="${{ env.OVERLAY_PATH }}/kustomization.yaml"
