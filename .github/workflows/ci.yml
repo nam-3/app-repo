@@ -6,18 +6,24 @@ on:
   workflow_dispatch:
 
 env:
+  
+  # Docker Hub 이미지 경로 (pipeline-sample로 복원)
   IMAGE_NAME: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/pipeline-sample
-  MANIFEST_REPO_OWNER: nam-3 # 또는 secrets 로 관리
-  MANIFEST_REPO_NAME: manifest-repo
+  
+  # Manifest Repository 정보 (Secret 참조 유지)
+  MANIFEST_REPO_OWNER: ${{ secrets.MANIFEST_REPO_OWNER }}
+  MANIFEST_REPO_NAME: ${{ secrets.MANIFEST_REPO_NAME }}
   MANIFEST_REPO_BRANCH: main
-  OVERLAY_PATH: overlays/dev # dev/stage/prod 중 원하는 대상
+  
+  # Kustomize 오버레이 경로 및 이미지 이름 (pipeline-sample로 복원)
+  OVERLAY_PATH: overlays/dev
   KUSTOMIZE_IMAGE_NAME: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/pipeline-sample
 
 jobs:
   build-push-bump:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # manifest-repo 업데이트 시 필요(토큰 사용)
+      contents: write
       packages: read
     steps:
       - name: Checkout app repo
@@ -29,6 +35,8 @@ jobs:
           SHORT_SHA=${GITHUB_SHA::7}
           DATE=$(date -u +'%Y%m%d-%H%M%S')
           echo "TAG=v${DATE}-${SHORT_SHA}" >> $GITHUB_OUTPUT
+          # TAG 값을 환경 변수로도 저장 (다음 단계에서 사용할 수 있도록)
+          echo "TAG=v${DATE}-${SHORT_SHA}" >> $GITHUB_ENV 
 
       - name: Login to Docker Hub
         uses: docker/login-action@v3
@@ -46,25 +54,33 @@ jobs:
       # manifest-repo 클론
       - name: Checkout manifest repo
         run: |
-          git clone --depth 1 https://${{ secrets.MANIFEST_REPO_TOKEN }}@github.com/${{ env.MANIFEST_REPO_OWNER }}/${{ env.MANIFEST_REPO_NAME }}.git
-          cd ${{ env.MANIFEST_REPO_NAME }}
+          # manifest-repo를 'manifests' 디렉토리에 클론
+          git clone --depth 1 https://${{ secrets.MANIFEST_REPO_TOKEN }}@github.com/${{ env.MANIFEST_REPO_OWNER }}/${{ env.MANIFEST_REPO_NAME }}.git manifests
+          cd manifests
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      # yq 설치 (Kustomize images newTag 갱신)
+      # yq 설치
       - name: Install yq
         run: |
           sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
 
+      # ⭐ 핵심 수정: yq 내부 env() 함수 대신 셸 변수 치환 사용
       - name: Bump image tag in kustomization.yaml
-        working-directory: ${{ env.MANIFEST_REPO_NAME }}
+        working-directory: manifests # 클론한 디렉토리로 변경
         run: |
+          # GitHub Actions 변수를 셸 변수로 명시적으로 선언
+          TAG="${{ steps.vars.outputs.TAG }}"
+          KUSTOMIZE_IMAGE_NAME="${{ env.KUSTOMIZE_IMAGE_NAME }}"
           FILE="${{ env.OVERLAY_PATH }}/kustomization.yaml"
-          echo "Updating ${FILE} image tag to ${{ steps.vars.outputs.TAG }}"
-          # images[].name == KUSTOMIZE_IMAGE_NAME 인 항목의 newTag 를 교체
+          
+          echo "Updating ${FILE} image tag to $TAG"
+          
+          # yq 명령: env() 대신 Bash 변수 ($VARIABLE) 치환 사용
+          # 이 방식이 GitHub Actions 환경에서 가장 안정적으로 작동합니다.
           yq -i '
-            (.images[] | select(.name == env(KUSTOMIZE_IMAGE_NAME)) .newTag) = env(TAG)
+            (.images[] | select(.name == "'$KUSTOMIZE_IMAGE_NAME'") | .newTag) = "'$TAG'"
           ' "$FILE"
 
           # 변경 확인
@@ -72,10 +88,12 @@ jobs:
           cat "$FILE"
 
       - name: Commit & Push
-        working-directory: ${{ env.MANIFEST_REPO_NAME }}
+        working-directory: manifests
         run: |
+          TAG="${{ steps.vars.outputs.TAG }}"
+          KUSTOMIZE_IMAGE_NAME="${{ env.KUSTOMIZE_IMAGE_NAME }}"
+          
           git add .
-          git commit -m "chore: bump ${KUSTOMIZE_IMAGE_NAME} to tag ${{ steps.vars.outputs.TAG }}"
+          git commit -m "chore: bump $KUSTOMIZE_IMAGE_NAME to tag $TAG"
           git push origin ${{ env.MANIFEST_REPO_BRANCH }}
-
 
