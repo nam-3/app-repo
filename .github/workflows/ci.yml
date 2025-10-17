@@ -1,0 +1,74 @@
+name: CI - Build & Push & Bump Manifest
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/sample-app
+  MANIFEST_REPO_OWNER: ${{ secrets.MANIFEST_REPO_OWNER }}   # 예: nam-3
+  MANIFEST_REPO_NAME:  ${{ secrets.MANIFEST_REPO_NAME }}    # 예: manifest-repo
+  MANIFEST_REPO_BRANCH: main
+  OVERLAY_PATH: overlays/dev
+  KUSTOMIZE_IMAGE_NAME: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/sample-app
+
+jobs:
+  build-push-bump:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout app repo
+        uses: actions/checkout@v4
+
+      - name: Set version/tag
+        id: vars
+        run: |
+          SHORT_SHA=${GITHUB_SHA::7}
+          DATE=$(date -u +'%Y%m%d-%H%M%S')
+          echo "TAG=v${DATE}-${SHORT_SHA}" >> $GITHUB_OUTPUT
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.TAG }}
+            ${{ env.IMAGE_NAME }}:latest
+
+      - name: Checkout manifest repo
+        run: |
+          git clone --depth 1 https://${{ secrets.MANIFEST_REPO_TOKEN }}@github.com/${{ env.MANIFEST_REPO_OWNER }}/${{ env.MANIFEST_REPO_NAME }}.git
+          cd ${{ env.MANIFEST_REPO_NAME }}
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Bump image tag in kustomization.yaml
+        working-directory: ${{ env.MANIFEST_REPO_NAME }}
+        run: |
+          FILE="${{ env.OVERLAY_PATH }}/kustomization.yaml"
+          echo "Updating ${FILE} image tag to ${{ steps.vars.outputs.TAG }}"
+          yq -i '
+            (.images[] | select(.name == env(KUSTOMIZE_IMAGE_NAME)) .newTag) = env(TAG)
+          ' "$FILE"
+          echo "---- changed kustomization.yaml ----"
+          cat "$FILE"
+
+      - name: Commit & Push
+        working-directory: ${{ env.MANIFEST_REPO_NAME }}
+        run: |
+          git add .
+          git commit -m "chore: bump ${KUSTOMIZE_IMAGE_NAME} to tag ${{ steps.vars.outputs.TAG }}"
+          git push origin ${{ env.MANIFEST_REPO_BRANCH }}
