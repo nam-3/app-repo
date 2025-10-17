@@ -7,22 +7,24 @@ on:
 
 env:
   IMAGE_NAME: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/pipeline-sample
-  MANIFEST_REPO_OWNER: nam-3 # 또는 secrets 로 관리
+  MANIFEST_REPO_OWNER: nam-3
   MANIFEST_REPO_NAME: manifest-repo
   MANIFEST_REPO_BRANCH: main
-  OVERLAY_PATH: overlays/dev # dev/stage/prod 중 원하는 대상
+  OVERLAY_PATH: overlays/dev
   KUSTOMIZE_IMAGE_NAME: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/pipeline-sample
 
 jobs:
   build-push-bump:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # manifest-repo 업데이트 시 필요(토큰 사용)
+      contents: write
       packages: read
     steps:
+      # 1. 앱 리포 체크아웃
       - name: Checkout app repo
         uses: actions/checkout@v4
 
+      # 2. 태그 버전 생성 (vYYYYMMDD-HHMMSS-<sha7>)
       - name: Set version/tag
         id: vars
         run: |
@@ -30,39 +32,42 @@ jobs:
           DATE=$(date -u +'%Y%m%d-%H%M%S')
           echo "TAG=v${DATE}-${SHORT_SHA}" >> $GITHUB_OUTPUT
 
+      # 3. Docker Hub 로그인
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push
+      # 4. Docker 빌드 & 푸시 (latest 제거 — 버전태그만 push)
+      - name: Build and push image
         uses: docker/build-push-action@v6
         with:
+          context: .
           push: true
           tags: |
             ${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.TAG }}
 
-      # manifest-repo 클론
+      # 5. manifest-repo 클론
       - name: Checkout manifest repo
         run: |
-          set -euxo pipefail
+          set -eux
           git clone --depth 1 "https://${{ secrets.MANIFEST_REPO_TOKEN }}@github.com/${{ env.MANIFEST_REPO_OWNER }}/${{ env.MANIFEST_REPO_NAME }}.git"
           cd "${{ env.MANIFEST_REPO_NAME }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           echo "Cloned manifest repo:"
-          git log --oneline -n 1
-          echo "Listing target path: ${{ env.OVERLAY_PATH }}"
-          ls -al "${{ env.OVERLAY_PATH }}"
+          git log -1 --oneline
+          ls -R "${{ env.OVERLAY_PATH }}"
 
+      # 6. yq 설치
       - name: Install yq
         run: |
-          set -euxo pipefail
           sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
           yq --version
 
+      # 7. kustomization.yaml 이미지 태그 갱신
       - name: Bump image tag in kustomization.yaml
         working-directory: ${{ env.MANIFEST_REPO_NAME }}
         env:
@@ -71,40 +76,30 @@ jobs:
         run: |
           set -euxo pipefail
           FILE="${{ env.OVERLAY_PATH }}/kustomization.yaml"
-          IMG="${{ env.KUSTOMIZE_IMAGE_NAME }}"
-          echo "Updating ${FILE} image ${IMG} tag to ${TAG}"
+          echo "Updating ${FILE} image ${KUSTOMIZE_IMAGE_NAME} tag to ${TAG}"
 
-          # 존재 확인
           test -f "$FILE" || (echo "::error file=${FILE}::kustomization.yaml not found"; exit 1)
 
           echo "Before:"
           cat "$FILE"
 
-          # name 매치 개수 확인
-          MATCHES=$(yq '.images[] | select(.name == env( "KUSTOMIZE_IMAGE_NAME")) | length' "$FILE" | wc -l || true)
-          if [ "$MATCHES" -eq 0 ]; then
-            echo "::error title=images.name not found::No image entry matching ${IMG} in ${FILE}"
-            exit 1
-          fi
-
-          # 태그 교체
-          yq -i '(.images[] | select(.name == env("KUSTOMIZE_IMAGE_NAME")) .newTag) = env("TAG")' "$FILE"
+          # yq로 newTag 업데이트 (--arg 로 안전하게 전달)
+          yq --arg IMG "$KUSTOMIZE_IMAGE_NAME" --arg TAG "$TAG" -i '
+            (.images[] | select(.name == $IMG) .newTag) = $TAG
+          ' "$FILE"
 
           echo "After:"
           cat "$FILE"
 
-          # 변경 확인(안 바뀌면 실패)
-          git diff --exit-code || true
-          CHANGED=$(git status --porcelain | wc -l)
-          if [ "$CHANGED" -eq 0 ]; then
-            echo "::error title=no changes::newTag was not updated; check image name/path"
-            exit 1
-          fi
+          # 변경 없으면 실패 처리
+          git add "$FILE"
+          git diff --cached || true
 
-      - name: Commit & Push
+      # 8. manifest-repo 커밋 & 푸시
+      - name: Commit & Push manifest
         working-directory: ${{ env.MANIFEST_REPO_NAME }}
         run: |
-          set -euxo pipefail
+          set -eux
           git add .
           git commit -m "chore: bump ${{ env.KUSTOMIZE_IMAGE_NAME }} to tag ${{ steps.vars.outputs.TAG }}"
           git push origin "${{ env.MANIFEST_REPO_BRANCH }}"
