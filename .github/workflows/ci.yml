@@ -61,6 +61,16 @@ jobs:
           git log -1 --oneline
           ls -R "${{ env.OVERLAY_PATH }}"
 
+      - name: Install yq v3 (Go version)
+        run: |
+          set -eux
+          sudo rm -f /usr/bin/yq /usr/local/bin/yq || true
+          curl -L https://github.com/mikefarah/yq/releases/download/3.4.1/yq_linux_amd64 -o yq
+          sudo mv yq /usr/local/bin/yq
+          sudo chmod +x /usr/local/bin/yq
+          yq --version
+
+
       # 6️⃣ yq 버전 확인 (v3.x)
       - name: Check yq version
         run: |
