@@ -46,35 +46,65 @@ jobs:
       # manifest-repo 클론
       - name: Checkout manifest repo
         run: |
-          git clone --depth 1 https://${{ secrets.MANIFEST_REPO_TOKEN }}@github.com/${{ env.MANIFEST_REPO_OWNER }}/${{ env.MANIFEST_REPO_NAME }}.git
-          cd ${{ env.MANIFEST_REPO_NAME }}
+          set -euxo pipefail
+          git clone --depth 1 "https://${{ secrets.MANIFEST_REPO_TOKEN }}@github.com/${{ env.MANIFEST_REPO_OWNER }}/${{ env.MANIFEST_REPO_NAME }}.git"
+          cd "${{ env.MANIFEST_REPO_NAME }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          echo "Cloned manifest repo:"
+          git log --oneline -n 1
+          echo "Listing target path: ${{ env.OVERLAY_PATH }}"
+          ls -al "${{ env.OVERLAY_PATH }}"
 
-      # yq 설치 (Kustomize images newTag 갱신)
       - name: Install yq
         run: |
+          set -euxo pipefail
           sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
+          yq --version
 
       - name: Bump image tag in kustomization.yaml
         working-directory: ${{ env.MANIFEST_REPO_NAME }}
+        env:
+          TAG: ${{ steps.vars.outputs.TAG }}
         run: |
+          set -euxo pipefail
           FILE="${{ env.OVERLAY_PATH }}/kustomization.yaml"
-          echo "Updating ${FILE} image tag to ${{ steps.vars.outputs.TAG }}"
-          # images[].name == KUSTOMIZE_IMAGE_NAME 인 항목의 newTag 를 교체
-          yq -i '
-            (.images[] | select(.name == env(KUSTOMIZE_IMAGE_NAME)) .newTag) = env(TAG)
-          ' "$FILE"
+          IMG="${{ env.KUSTOMIZE_IMAGE_NAME }}"
+          echo "Updating ${FILE} image ${IMG} tag to ${TAG}"
 
-          # 변경 확인
-          echo "---- changed kustomization.yaml ----"
+          # 존재 확인
+          test -f "$FILE" || (echo "::error file=${FILE}::kustomization.yaml not found"; exit 1)
+
+          echo "Before:"
           cat "$FILE"
+
+          # name 매치 개수 확인
+          MATCHES=$(yq '.images[] | select(.name == env( "KUSTOMIZE_IMAGE_NAME")) | length' "$FILE" | wc -l || true)
+          if [ "$MATCHES" -eq 0 ]; then
+            echo "::error title=images.name not found::No image entry matching ${IMG} in ${FILE}"
+            exit 1
+          fi
+
+          # 태그 교체
+          yq -i '(.images[] | select(.name == env("KUSTOMIZE_IMAGE_NAME")) .newTag) = env("TAG")' "$FILE"
+
+          echo "After:"
+          cat "$FILE"
+
+          # 변경 확인(안 바뀌면 실패)
+          git diff --exit-code || true
+          CHANGED=$(git status --porcelain | wc -l)
+          if [ "$CHANGED" -eq 0 ]; then
+            echo "::error title=no changes::newTag was not updated; check image name/path"
+            exit 1
+          fi
 
       - name: Commit & Push
         working-directory: ${{ env.MANIFEST_REPO_NAME }}
         run: |
+          set -euxo pipefail
           git add .
-          git commit -m "chore: bump ${KUSTOMIZE_IMAGE_NAME} to tag ${{ steps.vars.outputs.TAG }}"
-          git push origin ${{ env.MANIFEST_REPO_BRANCH }}
+          git commit -m "chore: bump ${{ env.KUSTOMIZE_IMAGE_NAME }} to tag ${{ steps.vars.outputs.TAG }}"
+          git push origin "${{ env.MANIFEST_REPO_BRANCH }}"
 
